@@ -4,7 +4,7 @@ import os
 import openpyxl
 import logging
 from openpyxl import Workbook
-from openpyxl.styles import PatternFill
+from openpyxl.styles import PatternFill, Font, Border, Alignment # Import specific style components
 from datetime import datetime, timedelta
 import copy
 
@@ -28,8 +28,14 @@ def parse_note_date(cell_value):
         return cell_value.date()
     if isinstance(cell_value, (int, float)): # Excel stores dates as numbers
         try:
-            return datetime.fromtimestamp((cell_value - 25569) * 86400).date() # Convert Excel serial date to datetime
-        except:
+            # Excel's epoch is 1899-12-30 for Windows, 1904-01-01 for Mac.
+            # openpyxl typically handles this, but direct conversion needs care.
+            # A common approach is to use datetime.fromordinal
+            # For simplicity, let's assume standard Excel date (days since 1900-01-01, with 1900-02-29 bug)
+            # A safer way is to let openpyxl handle it during cell value retrieval,
+            # but if we get a raw number here, we'll try.
+            return datetime.fromordinal(datetime(1899, 12, 30).toordinal() + int(cell_value)).date()
+        except Exception:
             pass # Fallback to string parsing if conversion fails
 
     s_value = str(cell_value).strip()
@@ -139,7 +145,7 @@ def consolidate_excel_jsonl_insertion(
 
     # 5. Read existing data and styles
     existing_rows_data = [] # List of lists for cell values
-    existing_rows_styles = [] # List of lists for cell styles
+    existing_rows_styles = [] # List of lists of dictionaries for style components
 
     # Start from row 2 to skip header
     for r_idx in range(2, ws.max_row + 1):
@@ -148,8 +154,16 @@ def consolidate_excel_jsonl_insertion(
         for c_idx in range(1, len(headers) + 1): # Iterate up to the number of columns we care about
             cell = ws.cell(row=r_idx, column=c_idx)
             row_values.append(cell.value)
-            # Copy the style object to prevent modification of original
-            row_styles.append(copy.copy(cell._style) if hasattr(cell, '_style') else None)
+            
+            # Store style components as a dictionary for easier copying
+            cell_style_dict = {
+                'font': copy.copy(cell.font) if cell.font else None,
+                'fill': copy.copy(cell.fill) if cell.fill else None,
+                'border': copy.copy(cell.border) if cell.border else None,
+                'alignment': copy.copy(cell.alignment) if cell.alignment else None,
+                # Add other style properties if needed (e.g., protection, number_format)
+            }
+            row_styles.append(cell_style_dict)
         existing_rows_data.append(row_values)
         existing_rows_styles.append(row_styles)
 
@@ -185,39 +199,40 @@ def consolidate_excel_jsonl_insertion(
         insert_pos_in_combined = random.choice(eligible_insertion_indices)
 
         # Copy Case and Note Date from the row *that will be above* the new insertion
-        # This is `insert_pos_in_combined - 1` if inserting before an existing row,
-        # or the last row if appending.
         if insert_pos_in_combined > 0:
             prev_row_data = combined_data[insert_pos_in_combined - 1]
             rec["Case"] = prev_row_data[col_map["Case"] - 1]
             rec["Note Date"] = prev_row_data[col_map["Note Date"] - 1]
-            inherited_style_row = combined_styles[insert_pos_in_combined - 1]
+            inherited_style_row_dicts = combined_styles[insert_pos_in_combined - 1]
         else: # Inserting at the very beginning (after header)
             rec["Case"] = None
             rec["Note Date"] = None
-            inherited_style_row = [None] * len(headers) # No style to inherit
+            inherited_style_row_dicts = [{
+                'font': None, 'fill': None, 'border': None, 'alignment': None
+            }] * len(headers) # No style to inherit, create empty style dicts
 
         # Prepare new row values based on current headers order
         new_row_values = [rec.get(h, None) for h in headers]
         combined_data.insert(insert_pos_in_combined, new_row_values)
 
         # Prepare new row styles: inherit from above, but highlight 'Note'
-        new_row_styles = [copy.copy(s) if s else None for s in inherited_style_row]
-        note_col_index_0based = col_map["Note"] - 1
-        if note_col_index_0based < len(new_row_styles) and new_row_styles[note_col_index_0based]:
-            new_row_styles[note_col_index_0based].fill = highlight_fill
-        else: # If no style to inherit, create a new style for the note cell
-            new_style = openpyxl.styles.Style()
-            new_style.fill = highlight_fill
-            if note_col_index_0based >= len(new_row_styles): # Extend if necessary
-                new_row_styles.extend([None] * (note_col_index_0based - len(new_row_styles) + 1))
-            new_row_styles[note_col_index_0based] = new_style._style
+        new_row_style_dicts = [copy.deepcopy(s_dict) if s_dict else {
+            'font': None, 'fill': None, 'border': None, 'alignment': None
+        } for s_dict in inherited_style_row_dicts]
 
-        combined_styles.insert(insert_pos_in_combined, new_row_styles)
+        note_col_index_0based = col_map["Note"] - 1
+        if note_col_index_0based < len(new_row_style_dicts):
+            new_row_style_dicts[note_col_index_0based]['fill'] = highlight_fill
+        else: # Should not happen if headers are correctly managed, but for safety
+            logging.warning(f"Note column index {note_col_index_0based} out of bounds for new row styles. Highlighting skipped.")
+
+        combined_styles.insert(insert_pos_in_combined, new_row_style_dicts)
 
         # Update eligible indices to reflect the new row insertion
+        # This logic needs to be careful: if we insert at `idx`, all subsequent indices shift by 1.
         eligible_insertion_indices = [i + 1 if i >= insert_pos_in_combined else i for i in eligible_insertion_indices]
-        # If the chosen index was the last one (append), add the new last index
+        # If the chosen index was the last one (append), add the new last index to eligible_insertion_indices
+        # This ensures we can continue appending if all other spots are filled or if it was the only option.
         if insert_pos_in_combined == len(combined_data) - 1 and len(eligible_insertion_indices) == 0:
              eligible_insertion_indices.append(len(combined_data))
 
@@ -230,15 +245,19 @@ def consolidate_excel_jsonl_insertion(
     # 9. Clear existing worksheet data (rows 2 onwards) and write back combined data
     try:
         if ws.max_row > 1:
-            ws.delete_rows(2, ws.max_row - 1) # Delete all rows except header
+            # Delete all rows from row 2 to the current max_row
+            ws.delete_rows(2, ws.max_row - 1)
         logging.info("Cleared existing data rows from worksheet.")
 
-        for r_idx, (row_values, row_styles) in enumerate(zip(combined_data, combined_styles), start=2):
-            for c_idx, (value, style) in enumerate(zip(row_values, row_styles), start=1):
+        for r_idx, (row_values, row_style_dicts) in enumerate(zip(combined_data, combined_styles), start=2):
+            for c_idx, (value, style_dict) in enumerate(zip(row_values, row_style_dicts), start=1):
                 cell = ws.cell(row=r_idx, column=c_idx, value=value)
-                if style:
-                    # Apply the copied style object
-                    cell._style = copy.copy(style)
+                if style_dict:
+                    if style_dict['font']: cell.font = style_dict['font']
+                    if style_dict['fill']: cell.fill = style_dict['fill']
+                    if style_dict['border']: cell.border = style_dict['border']
+                    if style_dict['alignment']: cell.alignment = style_dict['alignment']
+                    # Apply other style properties here if stored in style_dict
         logging.info(f"Wrote back {len(combined_data)} rows to worksheet.")
     except Exception as e:
         logging.error(f"❌ Error writing data back to worksheet: {e}")
