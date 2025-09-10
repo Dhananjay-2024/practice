@@ -12,32 +12,33 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-def parse_note_date(cell_value):
-    """Parse Note Date from Excel cell (handles datetime or m/d/yyyy string)."""
-    if not cell_value:
+def parse_note_date(date_val):
+    """Parse Note Date in m/d/yyyy format into datetime object."""
+    if not date_val:
         return None
-    if isinstance(cell_value, datetime):
-        return cell_value.date()
+    if isinstance(date_val, datetime):
+        return date_val
     try:
-        return datetime.strptime(str(cell_value).strip(), "%m/%d/%Y").date()
-    except Exception:
-        return None
+        return datetime.strptime(str(date_val), "%m/%d/%Y")
+    except ValueError:
+        try:
+            return datetime.strptime(str(date_val), "%m-%d-%y")
+        except Exception:
+            return None
 
-def insert_jsonl_into_same_sheet(input_dir, excel_file, sheet_name, reference_date_str):
+def insert_jsonl_before_45days(input_dir, excel_file, sheet_name, reference_date_str):
     """
-    Insert JSONL notes into the same sheet as existing notes.
-    For each note:
-      - Look at rows where Note Date is within 90 days before reference_date.
-      - Sort those rows by Note Date.
-      - Pick the middle row by date and insert the note above it.
+    Insert JSONL records into an Excel sheet:
+    - Reads JSONL files from subdirectories
+    - Finds nearest row <= (reference_date - 45 days)
+    - Inserts new notes above that row
     """
+    # Parse reference date
+    reference_date = datetime.strptime(reference_date_str, "%m/%d/%Y")
+    threshold_date = reference_date - timedelta(days=45)
+    logging.info(f"Reference date: {reference_date.date()} | Threshold (45 days before): {threshold_date.date()}")
 
-    # Convert reference date string to date object
-    reference_date = datetime.strptime(reference_date_str, "%m/%d/%Y").date()
-    window_start = reference_date - timedelta(days=90)
-    logging.info(f"Reference date: {reference_date} | Window start (90 days prior): {window_start}")
-
-    # Collect all records from JSONL files
+    # Collect all JSONL records
     all_records = []
     for root, _, files in os.walk(input_dir):
         for file_name in files:
@@ -53,91 +54,73 @@ def insert_jsonl_into_same_sheet(input_dir, excel_file, sheet_name, reference_da
                                 "example_id": rec.get("example_id"),
                                 "note": rec.get("text", "")
                             })
-                    logging.info(f"Loaded {file_name} → {len(all_records)} records total so far")
+                    logging.info(f"Loaded {file_name}, total records: {len(all_records)}")
                 except Exception as e:
                     logging.error(f"❌ Failed to read {file_path}: {e}")
 
     if not all_records:
-        logging.warning("⚠️ No .jsonl files found in the directory or subdirectories.")
+        logging.warning("⚠️ No JSONL records found.")
         return
 
-    # Open workbook
+    # Open Excel workbook
     if not os.path.exists(excel_file):
-        logging.error(f"Excel file {excel_file} does not exist.")
+        logging.error(f"❌ Excel file {excel_file} not found.")
         return
 
-    try:
-        wb = openpyxl.load_workbook(excel_file)
-        if sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-        else:
-            logging.error(f"Sheet {sheet_name} not found in {excel_file}.")
+    wb = openpyxl.load_workbook(excel_file)
+    if sheet_name not in wb.sheetnames:
+        logging.error(f"❌ Sheet {sheet_name} not found in {excel_file}.")
+        return
+    ws = wb[sheet_name]
+
+    # Map headers
+    headers = {cell.value.lower(): idx+1 for idx, cell in enumerate(ws[1]) if cell.value}
+    required = ["case", "note date", "note", "file name", "example id"]
+    for req in required:
+        if req not in headers:
+            logging.error(f"❌ Required column '{req}' not found in headers: {headers}")
             return
-    except Exception as e:
-        logging.error(f"❌ Could not open Excel file {excel_file}: {e}")
-        return
 
-    # Normalize headers
-    headers = {}
-    for idx, cell in enumerate(ws[1], start=1):
-        if cell.value:
-            headers[cell.value.strip().lower()] = idx
+    case_col = headers["case"]
+    date_col = headers["note date"]
+    note_col = headers["note"]
+    file_col = headers["file name"]
+    id_col = headers["example id"]
 
-    required_cols = ["case", "note date", "note"]
-    if not all(k in headers for k in required_cols):
-        logging.error(f"❌ Required columns {required_cols} not found in sheet headers. Found: {list(headers.keys())}")
-        return
-
-    # Add missing optional headers
-    if "file name" not in headers:
-        ws.cell(row=1, column=len(headers) + 1, value="File Name")
-        headers["file name"] = len(headers) + 1
-    if "example id" not in headers:
-        ws.cell(row=1, column=len(headers) + 1, value="Example ID")
-        headers["example id"] = len(headers) + 1
-
-    # Collect candidate rows in 90-day window
-    candidate_rows = []
+    # Find best row to insert before
+    best_row = None
+    best_date = None
     for row in range(2, ws.max_row + 1):
-        cell_value = ws.cell(row=row, column=headers["note date"]).value
+        cell_value = ws.cell(row=row, column=date_col).value
         date_val = parse_note_date(cell_value)
-        logging.info(f"Row {row} - Note Date cell: {cell_value} | Parsed date: {date_val}")
-        if date_val and window_start <= date_val <= reference_date:
-            candidate_rows.append((row, date_val))
+        logging.info(f"Row {row}: Raw='{cell_value}' Parsed='{date_val}'")
+        if date_val and date_val <= threshold_date:
+            if best_date is None or date_val > best_date:
+                best_row, best_date = row, date_val
 
-    if not candidate_rows:
-        logging.warning("⚠️ No rows found within 90-day window from reference date. Notes will not be inserted.")
+    if not best_row:
+        logging.warning("⚠️ No eligible rows found before threshold date. Notes will not be inserted.")
         return
+    logging.info(f"Chosen row {best_row} with Note Date {best_date.date()} as insertion point.")
 
-    # Sort by date
-    candidate_rows.sort(key=lambda x: x[1])
-    logging.info(f"Candidate rows within window: {[f'Row {r}, Date {d}' for r, d in candidate_rows]}")
-
-    # Shuffle new records
+    # Shuffle records for randomness
     random.shuffle(all_records)
 
-    # Insert each record at approx middle row
+    # Insert records
     for idx, rec in enumerate(all_records, 1):
-        mid_index = len(candidate_rows) // 2
-        target_row, target_date = candidate_rows[mid_index]
+        ws.insert_rows(best_row)
 
-        logging.info(f"Inserting record {idx} above row {target_row} with Note Date {target_date}")
+        # Copy Case and Note Date from row above
+        ws.cell(row=best_row, column=case_col, value=ws.cell(row=best_row - 1, column=case_col).value)
+        ws.cell(row=best_row, column=date_col, value=ws.cell(row=best_row - 1, column=date_col).value)
 
-        ws.insert_rows(target_row)
-
-        # Copy Case & Note Date from row above
-        ws.cell(row=target_row, column=headers["case"],
-                value=ws.cell(row=target_row - 1, column=headers["case"]).value)
-        ws.cell(row=target_row, column=headers["note date"],
-                value=ws.cell(row=target_row - 1, column=headers["note date"]).value)
-
-        # Insert new note
-        ws.cell(row=target_row, column=headers["note"], value=rec["note"])
-        ws.cell(row=target_row, column=headers["file name"], value=rec["file_name"])
-        ws.cell(row=target_row, column=headers["example id"], value=rec["example_id"])
+        # Insert new data
+        ws.cell(row=best_row, column=note_col, value=rec["note"])
+        ws.cell(row=best_row, column=file_col, value=rec["file_name"])
+        ws.cell(row=best_row, column=id_col, value=rec["example_id"])
 
         if idx % 50 == 0:
             logging.info(f"Inserted {idx}/{len(all_records)} records...")
 
     wb.save(excel_file)
-    logging.info(f"✅ Successfully inserted {len(all_records)} JSONL records into {excel_file} (sheet: {sheet_name})")
+    logging.info(f"✅ Successfully inserted {len(all_records)} notes into {excel_file}, sheet={sheet_name}")
