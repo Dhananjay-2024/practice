@@ -1,0 +1,289 @@
+import json
+import random
+import os
+import openpyxl
+import logging
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Border, Alignment
+from datetime import datetime, timedelta
+import copy
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+
+def parse_note_date(cell_value):
+    """
+    Robustly parses a cell value into a date object.
+    Handles datetime objects and common string formats (m/d/yyyy, MM-DD-YY, YYYY-MM-DD).
+    """
+    if not cell_value:
+        return None
+    if isinstance(cell_value, datetime):
+        return cell_value.date()
+    if isinstance(cell_value, (int, float)): # Excel stores dates as numbers
+        try:
+            # Excel's epoch is 1899-12-30 for Windows, 1904-01-01 for Mac.
+            # A common approach is to use datetime.fromordinal
+            return datetime.fromordinal(datetime(1899, 12, 30).toordinal() + int(cell_value)).date()
+        except Exception:
+            pass # Fallback to string parsing if conversion fails
+
+    s_value = str(cell_value).strip()
+    for fmt in ["%m/%d/%Y", "%m-%d-%y", "%Y-%m-%d", "%m/%d/%y"]:
+        try:
+            return datetime.strptime(s_value, fmt).date()
+        except ValueError:
+            continue
+    logging.debug(f"Could not parse date: '{s_value}' with any known format.")
+    return None
+
+def consolidate_excel_jsonl_insertion(
+    input_dir: str,
+    excel_file: str,
+    sheet_name: str,
+    reference_date_str: str,
+    days_prior_threshold: int = 45,
+    days_future_threshold: int = 30, # New parameter for broadening range
+    highlight_color: str = "FFFACD" # Light yellow
+):
+    """
+    Consolidated function to insert JSONL notes into an Excel sheet.
+    Broadens eligible rows for insertion based on multiple date criteria.
+    New notes are never inserted at the very end of the sheet.
+
+    Args:
+        input_dir (str): Directory containing JSONL files (can have subdirectories).
+        excel_file (str): Path to the Excel file.
+        sheet_name (str): The name of the sheet to work with.
+        reference_date_str (str): A date string (e.g., "YYYY-MM-DD") to calculate the thresholds.
+        days_prior_threshold (int): Number of days prior to reference_date for one eligibility criterion.
+        days_future_threshold (int): Number of days future to reference_date for another eligibility criterion.
+        highlight_color (str): Hex color code for highlighting new notes.
+    """
+    logging.info(f"Starting consolidated JSONL insertion process for '{excel_file}' (sheet: '{sheet_name}').")
+
+    # 1. Calculate threshold dates
+    try:
+        reference_date = datetime.strptime(reference_date_str, "%Y-%m-%d").date()
+        prior_threshold_date = reference_date - timedelta(days=days_prior_threshold)
+        future_threshold_date = reference_date + timedelta(days=days_future_threshold)
+        logging.info(f"Reference Date: {reference_date}")
+        logging.info(f"Prior Threshold Date ({days_prior_threshold} days prior): {prior_threshold_date}")
+        logging.info(f"Future Threshold Date ({days_future_threshold} days future): {future_threshold_date}")
+    except ValueError as e:
+        logging.error(f"❌ Invalid reference_date_str format. Please use YYYY-MM-DD. Error: {e}")
+        return
+
+    # 2. Collect all records from JSONL files
+    all_jsonl_records = []
+    logging.info(f"Scanning directory: {input_dir} for .jsonl files...")
+    for root, _, files in os.walk(input_dir):
+        for file_name in files:
+            if file_name.endswith(".jsonl"):
+                file_path = os.path.join(root, file_name)
+                clean_name = os.path.splitext(file_name)[0]
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        for line in f:
+                            rec = json.loads(line)
+                            all_jsonl_records.append({
+                                "Case": None, # Will be copied from above
+                                "Note Date": None, # Will be copied from above
+                                "Note": rec.get("text", ""),
+                                "File Name": clean_name,
+                                "Example ID": rec.get("example_id")
+                            })
+                    logging.info(f"Loaded {file_name} → {len(all_jsonl_records)} total records so far.")
+                except json.JSONDecodeError as e:
+                    logging.error(f"❌ Failed to parse JSONL line in {file_path}: {e}")
+                except Exception as e:
+                    logging.error(f"❌ Failed to read {file_path}: {e}")
+
+    if not all_jsonl_records:
+        logging.warning("⚠️ No .jsonl files found or no valid records loaded. Exiting.")
+        return
+
+    # 3. Load or create workbook and sheet
+    wb = None
+    try:
+        if os.path.exists(excel_file):
+            wb = openpyxl.load_workbook(excel_file)
+            if sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                logging.info(f"Loaded existing sheet '{sheet_name}' from '{excel_file}'.")
+            else:
+                ws = wb.create_sheet(sheet_name)
+                ws.append(["Case", "Note Date", "Note", "File Name", "Example ID"]) # Add default headers
+                logging.info(f"Created new sheet '{sheet_name}' in '{excel_file}'.")
+        else:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = sheet_name
+            ws.append(["Case", "Note Date", "Note", "File Name", "Example ID"]) # Add default headers
+            logging.info(f"Created new Excel file '{excel_file}' and sheet '{sheet_name}'.")
+    except Exception as e:
+        logging.error(f"❌ Error opening/creating Excel file '{excel_file}' or sheet '{sheet_name}': {e}")
+        if wb: wb.close()
+        return
+
+    # 4. Ensure headers exist and get column indices
+    headers = [cell.value for cell in ws[1] if cell.value is not None]
+    required_headers = ["Case", "Note Date", "Note", "File Name", "Example ID"]
+    for header in required_headers:
+        if header not in headers:
+            ws.cell(row=1, column=len(headers) + 1, value=header)
+            headers.append(header) # Update local headers list
+    col_map = {h: headers.index(h) + 1 for h in headers}
+
+    if not all(k in col_map for k in ["Case", "Note Date", "Note", "File Name", "Example ID"]):
+        logging.error("❌ Critical headers (Case, Note Date, Note, File Name, Example ID) could not be established. Exiting.")
+        wb.close()
+        return
+
+    # 5. Read existing data and styles
+    existing_rows_data = [] # List of lists for cell values
+    existing_rows_styles = [] # List of lists of dictionaries for style components
+
+    # Start from row 2 to skip header
+    for r_idx in range(2, ws.max_row + 1):
+        row_values = []
+        row_styles = []
+        for c_idx in range(1, len(headers) + 1): # Iterate up to the number of columns we care about
+            cell = ws.cell(row=r_idx, column=c_idx)
+            row_values.append(cell.value)
+            
+            # Store style components as a dictionary for easier copying
+            cell_style_dict = {
+                'font': copy.copy(cell.font) if cell.font else None,
+                'fill': copy.copy(cell.fill) if cell.fill else None,
+                'border': copy.copy(cell.border) if cell.border else None,
+                'alignment': copy.copy(cell.alignment) if cell.alignment else None,
+            }
+            row_styles.append(cell_style_dict)
+        existing_rows_data.append(row_values)
+        existing_rows_styles.append(row_styles)
+
+    logging.info(f"Read {len(existing_rows_data)} existing data rows from sheet.")
+
+    # 6. Determine eligible insertion indices
+    # We want to insert *before* rows that meet the date criteria.
+    # The index here refers to the position in `existing_rows_data` (0-indexed).
+    eligible_insertion_indices = []
+
+    def is_eligible_for_insertion(parsed_date):
+        """Defines the multiple criteria for a row to be eligible for insertion."""
+        if not parsed_date:
+            return False
+        # Criteria 1: Note Date is prior to or on the prior_threshold_date
+        condition1 = parsed_date <= prior_threshold_date
+        # Criteria 2: Note Date is on or after the future_threshold_date
+        condition2 = parsed_date >= future_threshold_date
+        # Add more conditions here as needed, e.g.,
+        # condition3 = parsed_date.year == 2024
+        return condition1 or condition2 # Combine conditions with OR/AND as required
+
+    for idx, row_data in enumerate(existing_rows_data):
+        note_date_val = row_data[col_map["Note Date"] - 1] # -1 because col_map is 1-indexed
+        parsed_date = parse_note_date(note_date_val)
+        if is_eligible_for_insertion(parsed_date):
+            eligible_insertion_indices.append(idx) # Index where new note will be inserted *before*
+
+    if not eligible_insertion_indices:
+        logging.warning(f"⚠️ No eligible rows found based on the defined date criteria. JSONL notes will NOT be inserted.")
+        wb.close()
+        return # Exit if no eligible spots
+
+    logging.info(f"Found {len(eligible_insertion_indices)} eligible insertion points based on broadened criteria.")
+
+    # 7. Shuffle JSONL records for random distribution
+    random.shuffle(all_jsonl_records)
+
+    # 8. Insert JSONL records into combined data/styles in memory
+    combined_data = existing_rows_data.copy()
+    combined_styles = existing_rows_styles.copy()
+    highlight_fill = PatternFill(start_color=highlight_color, end_color=highlight_color, fill_type="solid")
+
+    for idx, rec in enumerate(all_jsonl_records):
+        if not eligible_insertion_indices:
+            logging.warning(f"Ran out of eligible insertion points after {idx} records. Remaining {len(all_jsonl_records) - idx} JSONL notes not inserted.")
+            break # Stop if no more eligible spots
+
+        # Choose a random eligible index
+        insert_pos_in_combined = random.choice(eligible_insertion_indices)
+
+        # Copy Case and Note Date from the row *that will be above* the new insertion
+        if insert_pos_in_combined > 0:
+            prev_row_data = combined_data[insert_pos_in_combined - 1]
+            rec["Case"] = prev_row_data[col_map["Case"] - 1]
+            rec["Note Date"] = prev_row_data[col_map["Note Date"] - 1]
+            inherited_style_row_dicts = combined_styles[insert_pos_in_combined - 1]
+        else: # Inserting at the very beginning (after header, i.e., index 0 of combined_data)
+            rec["Case"] = None
+            rec["Note Date"] = None
+            inherited_style_row_dicts = [{
+                'font': None, 'fill': None, 'border': None, 'alignment': None
+            }] * len(headers) # No style to inherit, create empty style dicts
+
+        # Prepare new row values based on current headers order
+        new_row_values = [rec.get(h, None) for h in headers]
+        combined_data.insert(insert_pos_in_combined, new_row_values)
+
+        # Prepare new row styles: inherit from above, but highlight 'Note'
+        new_row_style_dicts = [copy.deepcopy(s_dict) if s_dict else {
+            'font': None, 'fill': None, 'border': None, 'alignment': None
+        } for s_dict in inherited_style_row_dicts]
+
+        note_col_index_0based = col_map["Note"] - 1
+        if note_col_index_0based < len(new_row_style_dicts):
+            new_row_style_dicts[note_col_index_0based]['fill'] = highlight_fill
+        else:
+            logging.warning(f"Note column index {note_col_index_0based} out of bounds for new row styles. Highlighting skipped.")
+
+        combined_styles.insert(insert_pos_in_combined, new_row_style_dicts)
+
+        # Update eligible indices to reflect the new row insertion
+        # Remove the chosen index, and increment any subsequent indices
+        eligible_insertion_indices.remove(insert_pos_in_combined) # Remove the used spot
+        eligible_insertion_indices = [i + 1 if i >= insert_pos_in_combined else i for i in eligible_insertion_indices]
+
+        if (idx + 1) % 100 == 0:
+            logging.info(f"Processed {idx + 1}/{len(all_jsonl_records)} JSONL records in memory.")
+
+    logging.info(f"Finished processing {idx + 1 if idx >= 0 else 0}/{len(all_jsonl_records)} JSONL records in memory.")
+
+    # 9. Clear existing worksheet data (rows 2 onwards) and write back combined data
+    try:
+        if ws.max_row > 1:
+            ws.delete_rows(2, ws.max_row - 1)
+        logging.info("Cleared existing data rows from worksheet.")
+
+        for r_idx, (row_values, row_style_dicts) in enumerate(zip(combined_data, combined_styles), start=2):
+            for c_idx, (value, style_dict) in enumerate(zip(row_values, row_style_dicts), start=1):
+                cell = ws.cell(row=r_idx, column=c_idx, value=value)
+                if style_dict:
+                    if style_dict['font']: cell.font = style_dict['font']
+                    if style_dict['fill']: cell.fill = style_dict['fill']
+                    if style_dict['border']: cell.border = style_dict['border']
+                    if style_dict['alignment']: cell.alignment = style_dict['alignment']
+        logging.info(f"Wrote back {len(combined_data)} rows to worksheet.")
+    except Exception as e:
+        logging.error(f"❌ Error writing data back to worksheet: {e}")
+        wb.close()
+        return
+
+    # 10. Save workbook
+    try:
+        wb.save(excel_file)
+        logging.info(f"✅ Successfully inserted {len(all_jsonl_records) - len(eligible_insertion_indices)} JSONL records into '{excel_file}' (sheet: '{sheet_name}').")
+    except Exception as e:
+        logging.error(f"❌ Failed to save Excel file '{excel_file}': {e}")
+    finally:
+        if wb:
+            wb.close()
+            logging.info("Workbook closed.")
