@@ -4,7 +4,7 @@ import random
 import logging
 from datetime import timedelta, datetime
 import pandas as pd
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 
 # ---------------- Logging ---------------- #
 logging.basicConfig(
@@ -133,7 +133,6 @@ def create_case_variants():
     # Load all bias records
     bias_records = load_bias_records()
 
-    # For each case, generate variants
     for case_no in selected_cases:
         logging.info(f"Processing Case {case_no}")
         case_block = get_case_block(note_df, case_no)
@@ -144,27 +143,33 @@ def create_case_variants():
 
         insert_date = pick_insertion_date(case_block, q_date)
 
+        # Create a new workbook for this case
+        wb_case = Workbook()
+        # Remove the default sheet
+        default_sheet = wb_case.active
+        wb_case.remove(default_sheet)
+
+        variant_count = 0
+
         for bias_name, records in bias_records.items():
             if not records:
                 continue
 
-            # Sample 5 records for this bias and case
             subset = random.sample(records, min(SAMPLE_SIZE, len(records)))
             logging.info(f"Case {case_no}, Bias {bias_name}: {len(subset)} samples")
 
             for idx, rec in enumerate(subset, start=1):
+                variant_count += 1
                 logging.info(f"Creating variant {idx} for Case {case_no}, Bias {bias_name}")
 
-                # Reload workbook fresh for each variant
+                # Reload Note Activity for each variant
                 wb = load_workbook(EXCEL_FILE)
                 ws_notes = wb[NOTE_SHEET]
 
-                # Ensure extra columns exist
                 headers = ensure_columns(ws_notes)
                 col_map = {h: headers.index(h)+1 for h in headers}
 
-                # Find insertion row (first row after insert_date in this case block)
-                insert_at = ws_notes.max_row + 1  # default append
+                insert_at = ws_notes.max_row + 1
                 for row in range(2, ws_notes.max_row+1):
                     if ws_notes.cell(row, col_map["Case"]).value == case_no:
                         try:
@@ -175,7 +180,6 @@ def create_case_variants():
                         except Exception:
                             continue
 
-                # Insert row
                 ws_notes.insert_rows(insert_at)
                 ws_notes.cell(insert_at, col_map["Case"]).value = case_no
                 ws_notes.cell(insert_at, col_map["Note Date"]).value = insert_date.strftime("%Y-%m-%d")
@@ -183,11 +187,19 @@ def create_case_variants():
                 ws_notes.cell(insert_at, col_map["example_id"]).value = rec["example_id"]
                 ws_notes.cell(insert_at, col_map["bias"]).value = rec["bias"]
 
-                # Save as a new variant file
-                out_name = f"Case{case_no}_Bias{bias_name}_Variant{idx}.xlsx"
-                out_path = os.path.join(OUTPUT_DIR, out_name)
-                wb.save(out_path)
-                logging.info(f"Saved {out_path}")
+                # Add this variant as a new sheet in the case workbook
+                sheet_name = f"Bias_{bias_name}_Var_{idx}"
+                ws_variant = wb_case.create_sheet(title=sheet_name)
+                # Copy data from ws_notes to ws_variant
+                for row in ws_notes.iter_rows(values_only=True):
+                    ws_variant.append(row)
+
+        # Save the workbook for this case if any variants were created
+        if variant_count > 0:
+            out_name = f"Case{case_no}_variants.xlsx"
+            out_path = os.path.join(OUTPUT_DIR, out_name)
+            wb_case.save(out_path)
+            logging.info(f"Saved {out_path}")
 
 
 # ---------------- Run ---------------- #
