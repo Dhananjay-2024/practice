@@ -28,11 +28,7 @@ CASE_SELECTION = "all"
 # ---------------- Helpers ---------------- #
 def ensure_columns(headers):
     """Ensure required columns exist in Note Activity sheet (except Note)."""
-    required_cols = ["example_id", "bias"]
-    for col in required_cols:
-        if col not in headers:
-            headers.append(col)
-            logging.info(f"Added missing column: {col}")
+    # Removed example_id and bias columns as per user request
     return headers
 
 def filter_cases(all_cases):
@@ -74,8 +70,8 @@ def load_bias_records():
 
 def get_case_block(note_df, case_no):
     case_block = note_df[note_df["Case"] == case_no].copy()
-    case_block["Note Date"] = pd.to_datetime(case_block["Note Date"], errors="coerce")
-    case_block = case_block.sort_values("Note Date")
+    case_block["Note Date "] = pd.to_datetime(case_block["Note Date "], errors="coerce")
+    case_block = case_block.sort_values("Note Date ")
     return case_block
 
 def pick_insertion_date(case_block, queue_date):
@@ -83,13 +79,13 @@ def pick_insertion_date(case_block, queue_date):
         return datetime.today()
     start_date = queue_date - timedelta(days=90)
     valid_dates = case_block[
-        (case_block["Note Date"] >= start_date) &
-        (case_block["Note Date"] <= queue_date)
-    ]["Note Date"].dropna().sort_values()
+        (case_block["Note Date "] >= start_date) &
+        (case_block["Note Date "] <= queue_date)
+    ]["Note Date "].dropna().sort_values()
     if not valid_dates.empty:
         return valid_dates.iloc[len(valid_dates)//2]
     fallback = queue_date - timedelta(days=45)
-    all_dates = case_block["Note Date"].dropna().sort_values()
+    all_dates = case_block["Note Date "].dropna().sort_values()
     if not all_dates.empty:
         return all_dates.iloc[len(all_dates)//2]
     return datetime.today()
@@ -99,7 +95,7 @@ def create_case_variants():
     logging.info("Loading workbook for case list...")
     note_df = pd.read_excel(EXCEL_FILE, sheet_name=NOTE_SHEET)
     acct_df = pd.read_excel(EXCEL_FILE, sheet_name=ACCOUNT_SHEET)
-    acct_df["Queue In Date"] = pd.to_datetime(acct_df["Queue In Date"], errors="coerce")
+    acct_df["Queue In Date "] = pd.to_datetime(acct_df["Queue In Date "], errors="coerce")
 
     all_cases = note_df["Case"].dropna().unique().tolist()
     all_cases = [int(c) for c in all_cases if str(c).isdigit()]
@@ -112,6 +108,7 @@ def create_case_variants():
     # Prepare headers
     headers = list(note_df.columns)
     headers = ensure_columns(headers)
+    # Remove example_id and bias from headers_to_keep and combined_headers
     headers_to_keep = [h for h in headers if h not in ("example_id", "bias")]
     combined_headers = ["Case", "Bias", "Variant"] + headers_to_keep
 
@@ -119,7 +116,7 @@ def create_case_variants():
 
     for case_no in selected_cases:
         case_block = get_case_block(note_df, case_no)
-        q_date = acct_df.loc[acct_df["Case"] == case_no, "Queue In Date"]
+        q_date = acct_df.loc[acct_df["Case"] == case_no, "Queue In Date "]
         q_date = q_date.iloc[0] if not q_date.empty else pd.NaT
         insert_date = pick_insertion_date(case_block, q_date)
 
@@ -127,24 +124,19 @@ def create_case_variants():
             if not records:
                 continue
             subset = random.sample(records, min(SAMPLE_SIZE, len(records)))
-            # Start with the original case block for this case
             variant_block = case_block.copy()
             for idx, rec in enumerate(subset, start=1):
-                # Build the new note row
                 new_note_row = {h: None for h in headers}
                 new_note_row["Case"] = case_no
-                new_note_row["Note Date"] = insert_date.strftime("%Y-%m-%d")
+                new_note_row["Note Date "] = insert_date.strftime("%Y-%m-%d")
                 new_note_row["Note"] = rec["Note"]
-                new_note_row["example_id"] = rec["example_id"]
-                new_note_row["bias"] = rec["bias"]
-                # Insert the new note into the block (accumulating)
+                # Removed example_id and bias from new_note_row
                 variant_block = pd.concat(
                     [variant_block, pd.DataFrame([new_note_row])],
                     ignore_index=True
                 )
-                variant_block["Note Date"] = pd.to_datetime(variant_block["Note Date"], errors="coerce")
-                variant_block = variant_block.sort_values("Note Date")
-                # Output each row of the updated block as a variant row
+                variant_block["Note Date "] = pd.to_datetime(variant_block["Note Date "], errors="coerce")
+                variant_block = variant_block.sort_values("Note Date ")
                 for _, row in variant_block.iterrows():
                     filtered_row = [row.get(h) for h in headers_to_keep]
                     all_variant_rows.append([case_no, bias_name, idx] + filtered_row)
