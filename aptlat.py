@@ -131,7 +131,8 @@ def create_case_variants():
                 # Insert the new note at the correct date
                 insert_date = pick_insertion_date(variant_block, q_date)
                 new_note_row = {h: None for h in headers}
-                new_note_row["Case"] = f"{case_no}.{variant_counter}"  # <-- Use grouped variant number
+                case_id = f"{case_no}_{rec['example_id']}_{bias_name}"  # <-- New format
+                new_note_row["Case"] = case_id
                 new_note_row["Note Date "] = insert_date.strftime("%Y-%m-%d")
                 new_note_row["Note"] = rec["Note"]
                 # Insert the new note
@@ -144,7 +145,7 @@ def create_case_variants():
                 # Output all notes for this variant
                 for _, row in variant_block.iterrows():
                     filtered_row = [row.get(h) for h in headers_to_keep]
-                    all_variant_rows.append([f"{case_no}.{variant_counter}", bias_name, variant_counter] + filtered_row)
+                    all_variant_rows.append([case_id, bias_name, variant_counter] + filtered_row)
                 variant_counter += 1  # <-- Increment for next variant
 
     # Write all variants to a single Excel sheet
