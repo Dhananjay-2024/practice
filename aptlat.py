@@ -118,25 +118,28 @@ def create_case_variants():
         case_block = get_case_block(note_df, case_no)
         q_date = acct_df.loc[acct_df["Case"] == case_no, "Queue In Date "]
         q_date = q_date.iloc[0] if not q_date.empty else pd.NaT
-        insert_date = pick_insertion_date(case_block, q_date)
 
         for bias_name, records in bias_records.items():
             if not records:
                 continue
             subset = random.sample(records, min(SAMPLE_SIZE, len(records)))
-            variant_block = case_block.copy()
             for idx, rec in enumerate(subset, start=1):
+                # Start from the original notes for each variant
+                variant_block = case_block.copy()
+                # Insert the new note at the correct date
+                insert_date = pick_insertion_date(variant_block, q_date)
                 new_note_row = {h: None for h in headers}
                 new_note_row["Case"] = case_no
                 new_note_row["Note Date "] = insert_date.strftime("%Y-%m-%d")
                 new_note_row["Note"] = rec["Note"]
-                # Removed example_id and bias from new_note_row
+                # Insert the new note
                 variant_block = pd.concat(
                     [variant_block, pd.DataFrame([new_note_row])],
                     ignore_index=True
                 )
                 variant_block["Note Date "] = pd.to_datetime(variant_block["Note Date "], errors="coerce")
                 variant_block = variant_block.sort_values("Note Date ")
+                # Output all notes for this variant
                 for _, row in variant_block.iterrows():
                     filtered_row = [row.get(h) for h in headers_to_keep]
                     all_variant_rows.append([case_no, bias_name, idx] + filtered_row)
