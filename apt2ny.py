@@ -58,38 +58,33 @@ def filter_cases(all_cases):
 
 
 def load_bias_records():
-    """Load all records grouped by bias (cache for sampling)."""
+    """Load all records grouped by bias from the data directory (no subdirectories)."""
+    DATA_DIR = "data"  # update to new directory
     bias_records = {}
-    for bias_name in os.listdir(DATA_DIR):
-        subdir = os.path.join(DATA_DIR, bias_name)
-        if not os.path.isdir(subdir):
+    for fname in os.listdir(DATA_DIR):
+        if not fname.endswith(".jsonl"):
             continue
-
+        bias_name = os.path.splitext(fname)[0]
+        fpath = os.path.join(DATA_DIR, fname)
+        logging.info(f"Reading {fpath}")
         records = []
-        for fname in os.listdir(subdir):
-            if not fname.endswith(".jsonl"):
-                continue
-            fpath = os.path.join(subdir, fname)
-            logging.info(f"Reading {fpath}")
-            with open(fpath, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        rec = json.loads(line)
-                        note_text = f"{rec.get('context','')} {rec.get('question','')}".strip()
-                        records.append({
-                            "example_id": rec.get("example_id", ""),
-                            "Note": note_text,
-                            "bias": bias_name
-                        })
-                    except Exception as e:
-                        logging.warning(f"Failed parsing line in {fname}: {e}")
-
+        with open(fpath, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                    note_text = f"{rec.get('context','')} {rec.get('question','')}".strip()
+                    records.append({
+                        "example_id": rec.get("example_id", ""),
+                        "Note": note_text,
+                        "bias": bias_name
+                    })
+                except Exception as e:
+                    logging.warning(f"Failed parsing line in {fname}: {e}")
         if records:
             bias_records[bias_name] = records
             logging.info(f"Loaded {len(records)} records for bias={bias_name}")
         else:
-            logging.warning(f"No records found in {subdir}")
-
+            logging.warning(f"No records found in {fpath}")
     return bias_records
 
 
