@@ -119,17 +119,19 @@ def create_case_variants():
         q_date = acct_df.loc[acct_df["Case"] == case_no, "Queue In Date "]
         q_date = q_date.iloc[0] if not q_date.empty else pd.NaT
 
+        variant_counter = 1  # <-- Start variant numbering per case
+
         for bias_name, records in bias_records.items():
             if not records:
                 continue
             subset = random.sample(records, min(SAMPLE_SIZE, len(records)))
-            for idx, rec in enumerate(subset, start=1):
+            for rec in subset:
                 # Start from the original notes for each variant
                 variant_block = case_block.copy()
                 # Insert the new note at the correct date
                 insert_date = pick_insertion_date(variant_block, q_date)
                 new_note_row = {h: None for h in headers}
-                new_note_row["Case"] = case_no
+                new_note_row["Case"] = f"{case_no}.{variant_counter}"  # <-- Use grouped variant number
                 new_note_row["Note Date "] = insert_date.strftime("%Y-%m-%d")
                 new_note_row["Note"] = rec["Note"]
                 # Insert the new note
@@ -142,7 +144,8 @@ def create_case_variants():
                 # Output all notes for this variant
                 for _, row in variant_block.iterrows():
                     filtered_row = [row.get(h) for h in headers_to_keep]
-                    all_variant_rows.append([case_no, bias_name, idx] + filtered_row)
+                    all_variant_rows.append([f"{case_no}.{variant_counter}", bias_name, variant_counter] + filtered_row)
+                variant_counter += 1  # <-- Increment for next variant
 
     # Write all variants to a single Excel sheet
     if len(all_variant_rows) > 1:
