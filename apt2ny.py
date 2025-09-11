@@ -190,9 +190,15 @@ def create_case_variants():
                 # Add this variant as a new sheet in the case workbook
                 sheet_name = f"Bias_{bias_name}_Var_{idx}"
                 ws_variant = wb_case.create_sheet(title=sheet_name)
-                # Copy data from ws_notes to ws_variant
-                for row in ws_notes.iter_rows(values_only=True):
-                    ws_variant.append(row)
+                # Copy data from ws_notes to ws_variant, dropping example_id and bias columns
+                headers_to_keep = [h for h in headers if h not in ("example_id", "bias")]
+                col_indexes_to_keep = [headers.index(h) for h in headers_to_keep]
+                # Write header
+                ws_variant.append(headers_to_keep)
+                # Write data rows
+                for row in ws_notes.iter_rows(min_row=2, values_only=True):
+                    filtered_row = [row[i] for i in col_indexes_to_keep]
+                    ws_variant.append(filtered_row)
 
         # Save the workbook for this case if any variants were created
         if variant_count > 0:
