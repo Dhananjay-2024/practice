@@ -127,9 +127,9 @@ def create_case_variants():
             if not records:
                 continue
             subset = random.sample(records, min(SAMPLE_SIZE, len(records)))
+            # Start with the original case block for this case
+            variant_block = case_block.copy()
             for idx, rec in enumerate(subset, start=1):
-                # Copy the case block for this variant
-                variant_block = case_block.copy()
                 # Build the new note row
                 new_note_row = {h: None for h in headers}
                 new_note_row["Case"] = case_no
@@ -137,7 +137,7 @@ def create_case_variants():
                 new_note_row["Note"] = rec["Note"]
                 new_note_row["example_id"] = rec["example_id"]
                 new_note_row["bias"] = rec["bias"]
-                # Insert the new note into the block
+                # Insert the new note into the block (accumulating)
                 variant_block = pd.concat(
                     [variant_block, pd.DataFrame([new_note_row])],
                     ignore_index=True
