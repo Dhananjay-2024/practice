@@ -97,7 +97,12 @@ def get_case_block(note_df, case_no):
 
 
 def pick_insertion_date(case_block, queue_date):
-    """Pick median Note Date within 90 days before Queue In Date."""
+    """Pick median Note Date within 90 days before Queue In Date.
+    Fallbacks:
+      1. 45 days before Queue In Date
+      2. Median of all Note Dates for the case
+      3. Today (if all else fails)
+    """
     if pd.isna(queue_date):
         logging.warning("Queue In Date is missing, falling back to today.")
         return datetime.today()
@@ -108,13 +113,24 @@ def pick_insertion_date(case_block, queue_date):
         (case_block["Note Date"] <= queue_date)
     ]["Note Date"].dropna().sort_values()
 
-    if valid_dates.empty:
-        fallback = queue_date - timedelta(days=45)
-        logging.info(f"No valid dates in window, fallback: {fallback.date()}")
-        return fallback
+    if not valid_dates.empty:
+        median_date = valid_dates.iloc[len(valid_dates)//2]
+        return median_date
 
-    median_date = valid_dates.iloc[len(valid_dates)//2]
-    return median_date
+    # Fallback 1: 45 days before Queue In Date
+    fallback = queue_date - timedelta(days=45)
+    logging.info(f"No valid dates in window, fallback: {fallback.date()}")
+
+    # Fallback 2: Median of all Note Dates for the case
+    all_dates = case_block["Note Date"].dropna().sort_values()
+    if not all_dates.empty:
+        median_all = all_dates.iloc[len(all_dates)//2]
+        logging.info(f"Using median of all Note Dates for safekeeping: {median_all.date()}")
+        return median_all
+
+    # Fallback 3: Today
+    logging.warning("No Note Dates available, falling back to today.")
+    return datetime.today()
 
 
 # ---------------- Main Logic ---------------- #
