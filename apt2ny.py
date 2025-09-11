@@ -133,6 +133,11 @@ def create_case_variants():
     # Load all bias records
     bias_records = load_bias_records()
 
+    # Prepare to collect all variants
+    all_variant_rows = []
+    headers_written = False
+    headers_to_keep = None
+
     for case_no in selected_cases:
         logging.info(f"Processing Case {case_no}")
         case_block = get_case_block(note_df, case_no)
@@ -143,14 +148,6 @@ def create_case_variants():
 
         insert_date = pick_insertion_date(case_block, q_date)
 
-        # Create a new workbook for this case
-        wb_case = Workbook()
-        # Remove the default sheet
-        default_sheet = wb_case.active
-        wb_case.remove(default_sheet)
-
-        variant_count = 0
-
         for bias_name, records in bias_records.items():
             if not records:
                 continue
@@ -159,7 +156,6 @@ def create_case_variants():
             logging.info(f"Case {case_no}, Bias {bias_name}: {len(subset)} samples")
 
             for idx, rec in enumerate(subset, start=1):
-                variant_count += 1
                 logging.info(f"Creating variant {idx} for Case {case_no}, Bias {bias_name}")
 
                 # Reload Note Activity for each variant
@@ -187,25 +183,31 @@ def create_case_variants():
                 ws_notes.cell(insert_at, col_map["example_id"]).value = rec["example_id"]
                 ws_notes.cell(insert_at, col_map["bias"]).value = rec["bias"]
 
-                # Add this variant as a new sheet in the case workbook
-                sheet_name = f"Bias_{bias_name}_Var_{idx}"
-                ws_variant = wb_case.create_sheet(title=sheet_name)
-                # Copy data from ws_notes to ws_variant, dropping example_id and bias columns
-                headers_to_keep = [h for h in headers if h not in ("example_id", "bias")]
-                col_indexes_to_keep = [headers.index(h) for h in headers_to_keep]
-                # Write header
-                ws_variant.append(headers_to_keep)
-                # Write data rows
+                # Prepare headers and indexes to keep (excluding example_id and bias)
+                if not headers_written:
+                    headers_to_keep = [h for h in headers if h not in ("example_id", "bias")]
+                    # Add columns for Case, Bias, Variant
+                    combined_headers = ["Case", "Bias", "Variant"] + headers_to_keep
+                    all_variant_rows.append(combined_headers)
+                    headers_written = True
+                    col_indexes_to_keep = [headers.index(h) for h in headers_to_keep]
+
+                # Write data rows (excluding example_id and bias)
                 for row in ws_notes.iter_rows(min_row=2, values_only=True):
                     filtered_row = [row[i] for i in col_indexes_to_keep]
-                    ws_variant.append(filtered_row)
+                    # Add Case, Bias, Variant columns
+                    all_variant_rows.append([case_no, bias_name, idx] + filtered_row)
 
-        # Save the workbook for this case if any variants were created
-        if variant_count > 0:
-            out_name = f"Case{case_no}_variants.xlsx"
-            out_path = os.path.join(OUTPUT_DIR, out_name)
-            wb_case.save(out_path)
-            logging.info(f"Saved {out_path}")
+    # Write all variants to a single Excel sheet
+    if len(all_variant_rows) > 1:
+        wb_all = Workbook()
+        ws_all = wb_all.active
+        ws_all.title = "All_Case_Variants"
+        for row in all_variant_rows:
+            ws_all.append(row)
+        out_path = os.path.join(OUTPUT_DIR, "All_Case_Variants.xlsx")
+        wb_all.save(out_path)
+        logging.info(f"Saved all variants to {out_path}")
 
 
 # ---------------- Run ---------------- #
