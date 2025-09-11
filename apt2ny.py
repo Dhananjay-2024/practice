@@ -133,9 +133,6 @@ def create_case_variants():
     # Load all bias records
     bias_records = load_bias_records()
 
-    # Prepare a DataFrame for the output: start with all selected cases' original rows
-    output_df = note_df[note_df["Case"].isin(selected_cases)].copy()
-
     for case_no in selected_cases:
         logging.info(f"Processing Case {case_no}")
         case_block = get_case_block(note_df, case_no)
@@ -146,7 +143,14 @@ def create_case_variants():
 
         insert_date = pick_insertion_date(case_block, q_date)
 
-        # For each bias, sample and append variants
+        # Create a new workbook for this case
+        wb_case = Workbook()
+        # Remove the default sheet
+        default_sheet = wb_case.active
+        wb_case.remove(default_sheet)
+
+        variant_count = 0
+
         for bias_name, records in bias_records.items():
             if not records:
                 continue
@@ -154,31 +158,48 @@ def create_case_variants():
             subset = random.sample(records, min(SAMPLE_SIZE, len(records)))
             logging.info(f"Case {case_no}, Bias {bias_name}: {len(subset)} samples")
 
-            for rec in subset:
-                # Create a new row for the variant
-                new_row = {
-                    "Case": case_no,
-                    "Note Date": insert_date.strftime("%Y-%m-%d"),
-                    "Note": rec["Note"],
-                }
-                # Add any other columns from the original sheet as empty
-                for col in output_df.columns:
-                    if col not in new_row:
-                        new_row[col] = ""
-                output_df = pd.concat([output_df, pd.DataFrame([new_row])], ignore_index=True)
+            for idx, rec in enumerate(subset, start=1):
+                variant_count += 1
+                logging.info(f"Creating variant {idx} for Case {case_no}, Bias {bias_name}")
 
-    # Drop 'example_id' and 'bias' columns if present
-    output_df = output_df[[col for col in output_df.columns if col not in ("example_id", "bias")]]
+                # Reload Note Activity for each variant
+                wb = load_workbook(EXCEL_FILE)
+                ws_notes = wb[NOTE_SHEET]
 
-    # Sort by Case and Note Date if desired
-    output_df = output_df.sort_values(["Case", "Note Date"])
+                headers = ensure_columns(ws_notes)
+                col_map = {h: headers.index(h)+1 for h in headers}
 
-    # Write to Excel (one sheet for all cases)
-    out_name = "SelectedCases_variants.xlsx"
-    out_path = os.path.join(OUTPUT_DIR, out_name)
-    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        output_df.to_excel(writer, sheet_name="Variants", index=False)
-    logging.info(f"Saved {out_path}")
+                insert_at = ws_notes.max_row + 1
+                for row in range(2, ws_notes.max_row+1):
+                    if ws_notes.cell(row, col_map["Case"]).value == case_no:
+                        try:
+                            note_date = pd.to_datetime(ws_notes.cell(row, col_map["Note Date"]).value)
+                            if note_date >= insert_date:
+                                insert_at = row
+                                break
+                        except Exception:
+                            continue
+
+                ws_notes.insert_rows(insert_at)
+                ws_notes.cell(insert_at, col_map["Case"]).value = case_no
+                ws_notes.cell(insert_at, col_map["Note Date"]).value = insert_date.strftime("%Y-%m-%d")
+                ws_notes.cell(insert_at, col_map["Note"]).value = rec["Note"]
+                ws_notes.cell(insert_at, col_map["example_id"]).value = rec["example_id"]
+                ws_notes.cell(insert_at, col_map["bias"]).value = rec["bias"]
+
+                # Add this variant as a new sheet in the case workbook
+                sheet_name = f"Bias_{bias_name}_Var_{idx}"
+                ws_variant = wb_case.create_sheet(title=sheet_name)
+                # Copy data from ws_notes to ws_variant
+                for row in ws_notes.iter_rows(values_only=True):
+                    ws_variant.append(row)
+
+        # Save the workbook for this case if any variants were created
+        if variant_count > 0:
+            out_name = f"Case{case_no}_variants.xlsx"
+            out_path = os.path.join(OUTPUT_DIR, out_name)
+            wb_case.save(out_path)
+            logging.info(f"Saved {out_path}")
 
 
 # ---------------- Run ---------------- #
