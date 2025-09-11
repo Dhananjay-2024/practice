@@ -128,22 +128,26 @@ def create_case_variants():
                 continue
             subset = random.sample(records, min(SAMPLE_SIZE, len(records)))
             for idx, rec in enumerate(subset, start=1):
-                # Prepare a new row based on the template, insert the new note
-                # Find the first row after insert_date or append at end
-                case_rows = note_df[note_df["Case"] == case_no].copy()
-                case_rows["Note Date"] = pd.to_datetime(case_rows["Note Date"], errors="coerce")
-                insert_idx = case_rows[case_rows["Note Date"] >= insert_date].index.min()
-                if pd.isna(insert_idx):
-                    insert_idx = note_df.index.max() + 1
-                # Build the row
-                new_row = {h: None for h in headers}
-                new_row["Case"] = case_no
-                new_row["Note Date"] = insert_date.strftime("%Y-%m-%d")
-                new_row["Note"] = rec["Note"]
-                new_row["example_id"] = rec["example_id"]
-                new_row["bias"] = rec["bias"]
-                filtered_row = [new_row.get(h) for h in headers_to_keep]
-                all_variant_rows.append([case_no, bias_name, idx] + filtered_row)
+                # Copy the case block for this variant
+                variant_block = case_block.copy()
+                # Build the new note row
+                new_note_row = {h: None for h in headers}
+                new_note_row["Case"] = case_no
+                new_note_row["Note Date"] = insert_date.strftime("%Y-%m-%d")
+                new_note_row["Note"] = rec["Note"]
+                new_note_row["example_id"] = rec["example_id"]
+                new_note_row["bias"] = rec["bias"]
+                # Insert the new note into the block
+                variant_block = pd.concat(
+                    [variant_block, pd.DataFrame([new_note_row])],
+                    ignore_index=True
+                )
+                variant_block["Note Date"] = pd.to_datetime(variant_block["Note Date"], errors="coerce")
+                variant_block = variant_block.sort_values("Note Date")
+                # Output each row of the updated block as a variant row
+                for _, row in variant_block.iterrows():
+                    filtered_row = [row.get(h) for h in headers_to_keep]
+                    all_variant_rows.append([case_no, bias_name, idx] + filtered_row)
 
     # Write all variants to a single Excel sheet
     if len(all_variant_rows) > 1:
