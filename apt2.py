@@ -23,10 +23,16 @@ SAMPLE_SIZE = 5
 OUTPUT_DIR = "case_variants"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# ---- Case selection ----
+# CASE_SELECTION = "all"   # all cases
+# CASE_SELECTION = 15      # single case
+# CASE_SELECTION = (4, 10) # range inclusive
+CASE_SELECTION = "all"
+
 
 # ---------------- Helpers ---------------- #
 def ensure_columns(ws):
-    """Ensure required columns exist in Note Activity sheet."""
+    """Ensure required columns exist in Note Activity sheet (except Note)."""
     headers = [cell.value for cell in ws[1]]
     required_cols = ["example_id", "bias"]
     for col in required_cols:
@@ -35,6 +41,20 @@ def ensure_columns(ws):
             headers.append(col)
             logging.info(f"Added missing column: {col}")
     return headers
+
+
+def filter_cases(all_cases):
+    """Filter cases based on CASE_SELECTION config."""
+    if CASE_SELECTION == "all":
+        return all_cases
+    elif isinstance(CASE_SELECTION, int):  # single case
+        return [CASE_SELECTION] if CASE_SELECTION in all_cases else []
+    elif isinstance(CASE_SELECTION, tuple) and len(CASE_SELECTION) == 2:
+        low, high = CASE_SELECTION
+        return [c for c in all_cases if low <= c <= high]
+    else:
+        logging.error("Invalid CASE_SELECTION format.")
+        return []
 
 
 def load_bias_records():
@@ -91,18 +111,20 @@ def pick_insertion_date(case_block):
 
 # ---------------- Main Logic ---------------- #
 def create_case_variants():
-    logging.info("Loading workbook...")
+    logging.info("Loading workbook for case list...")
     note_df = pd.read_excel(EXCEL_FILE, sheet_name=NOTE_SHEET)
 
     all_cases = note_df["Case"].dropna().unique().tolist()
     all_cases = [int(c) for c in all_cases if str(c).isdigit()]
-    logging.info(f"Found {len(all_cases)} cases: {all_cases}")
+    selected_cases = filter_cases(all_cases)
+
+    logging.info(f"Selected cases: {selected_cases}")
 
     # Load all bias records
     bias_records = load_bias_records()
 
     # For each case, generate variants
-    for case_no in all_cases:
+    for case_no in selected_cases:
         logging.info(f"Processing Case {case_no}")
         case_block = get_case_block(note_df, case_no)
         insert_date = pick_insertion_date(case_block)
